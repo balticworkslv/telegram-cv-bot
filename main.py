@@ -20,9 +20,12 @@ HR_EMAIL = os.getenv("HR_EMAIL")
 SCOPES = ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/spreadsheets']
 SERVICE_ACCOUNT_FILE = 'credentials.json'
 
-creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-drive_service = build('drive', 'v3', credentials=creds)
-sheets_service = build('sheets', 'v4', credentials=creds)
+import os
+import json
+from google.oauth2.service_account import Credentials
+
+creds_info = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
+creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
 
 # ID таблицы и папки на Google Drive (создай заранее)
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")

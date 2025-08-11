@@ -9,140 +9,100 @@ from googleapiclient.http import MediaFileUpload
 import smtplib
 from email.message import EmailMessage
 
-# Логи
+# ===== Логи =====
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-HR_EMAIL = os.getenv("HR_EMAIL")
+# ===== Переменные окружения =====
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+HR_EMAIL = os.getenv("HR_EMAIL", "").strip()
+EMAIL_USER = os.getenv("EMAIL_USER", "").strip()
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "").strip()
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "").strip()
+DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID", "").strip()
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
 
-# Google API setup
+# Проверяем, что всё есть
+required_vars = {
+    "BOT_TOKEN": BOT_TOKEN,
+    "HR_EMAIL": HR_EMAIL,
+    "EMAIL_USER": EMAIL_USER,
+    "EMAIL_PASSWORD": EMAIL_PASSWORD,
+    "SPREADSHEET_ID": SPREADSHEET_ID,
+    "DRIVE_FOLDER_ID": DRIVE_FOLDER_ID,
+    "GOOGLE_CREDENTIALS_JSON": GOOGLE_CREDENTIALS_JSON
+}
+
+for var, value in required_vars.items():
+    if not value:
+        raise ValueError(f"Missing environment variable: {var}")
+
+# ===== Google API =====
 SCOPES = ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/spreadsheets']
-
-# Загружаем учетные данные из переменной окружения
-creds_info = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
+creds_info = json.loads(GOOGLE_CREDENTIALS_JSON)
 creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
 
-# Инициализация сервисов
 drive_service = build('drive', 'v3', credentials=creds)
 sheets_service = build('sheets', 'v4', credentials=creds)
 
-# ID таблицы и папки на Google Drive
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID")
-
+# ===== Telegram Handlers =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Пришли мне своё резюме в формате PDF или DOCX.")
+    await update.message.reply_text("Привет! Пришли своё резюме (PDF или DOCX).")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        document = update.message.document
-        if not document:
-            await update.message.reply_text("Пожалуйста, отправьте файл в формате PDF или DOCX.")
-            return
-
-        # Проверяем формат файла
-        if not (document.file_name.lower().endswith('.pdf') or document.file_name.lower().endswith('.docx')):
-            await update.message.reply_text("Неверный формат файла. Отправьте PDF или DOCX.")
-            return
-
-        file = await document.get_file()
-        file_name = document.file_name
+        file = await update.message.document.get_file()
+        file_name = update.message.document.file_name
         file_path = f"/tmp/{file_name}"
-
         await file.download_to_drive(file_path)
-        logging.info(f"Файл {file_name} скачан во временную папку.")
 
-        # Отправка на email
         send_email(file_path, file_name)
-
-        # Загрузка в Google Drive
         upload_to_drive(file_path, file_name)
-
-        # Запись в Google Sheets
         append_to_sheet([file_name])
 
-        await update.message.reply_text("Спасибо, резюме принято и отправлено!")
+        await update.message.reply_text("Спасибо! Резюме получено.")
 
     except Exception as e:
-        logging.error(f"Ошибка обработки документа: {e}")
-        await update.message.reply_text("Произошла ошибка при обработке вашего резюме. Попробуйте позже.")
+        logging.exception("Ошибка при обработке документа")
+        await update.message.reply_text("Произошла ошибка. Попробуйте снова.")
 
+# ===== Email =====
 def send_email(file_path, file_name):
-    email_user = os.getenv("EMAIL_USER")
-    email_password = os.getenv("EMAIL_PASSWORD")
-
-    if not email_user or not email_password or not HR_EMAIL:
-        logging.error("Не заданы переменные окружения EMAIL_USER, EMAIL_PASSWORD или HR_EMAIL")
-        return
-
     msg = EmailMessage()
-    msg['Subject'] = 'Новое резюме'
-    msg['From'] = email_user
-    msg['To'] = HR_EMAIL
-    msg.set_content('Прикреплено новое резюме от кандидата.')
+    msg["From"] = EMAIL_USER
+    msg["To"] = HR_EMAIL
+    msg["Subject"] = f"Новое резюме: {file_name}"
 
-    # Читаем файл и прикрепляем
-    with open(file_path, 'rb') as f:
+    with open(file_path, "rb") as f:
         file_data = f.read()
-    # Определяем mime type по расширению
-    if file_name.lower().endswith('.pdf'):
-        maintype, subtype = 'application', 'pdf'
-    else:
-        maintype, subtype = 'application', 'vnd.openxmlformats-officedocument.wordprocessingml.document'
+    msg.add_attachment(file_data, maintype="application", subtype="octet-stream", filename=file_name)
 
-    msg.add_attachment(file_data, maintype=maintype, subtype=subtype, filename=file_name)
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(EMAIL_USER, EMAIL_PASSWORD)
+        server.send_message(msg)
 
-    # Отправка письма через SMTP (пример Gmail SMTP)
-    try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-            smtp.login(email_user, email_password)
-            smtp.send_message(msg)
-        logging.info("Письмо с резюме отправлено на email.")
-    except Exception as e:
-        logging.error(f"Ошибка отправки email: {e}")
-
+# ===== Google Drive =====
 def upload_to_drive(file_path, file_name):
-    try:
-        file_metadata = {
-            'name': file_name,
-            'parents': [DRIVE_FOLDER_ID]
-        }
-        media = MediaFileUpload(file_path, resumable=True)
-        drive_service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id'
-        ).execute()
-        logging.info(f"Файл {file_name} загружен в Google Drive.")
-    except Exception as e:
-        logging.error(f"Ошибка загрузки в Google Drive: {e}")
+    file_metadata = {"name": file_name, "parents": [DRIVE_FOLDER_ID]}
+    media = MediaFileUpload(file_path, resumable=True)
+    drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
 
-def append_to_sheet(row_values):
-    try:
-        body = {
-            'values': [row_values]
-        }
-        sheets_service.spreadsheets().values().append(
-            spreadsheetId=SPREADSHEET_ID,
-            range='Лист1!A1',  # замените 'Лист1' на имя вашего листа
-            valueInputOption='USER_ENTERED',
-            insertDataOption='INSERT_ROWS',
-            body=body
-        ).execute()
-        logging.info("Данные добавлены в Google Sheets.")
-    except Exception as e:
-        logging.error(f"Ошибка добавления данных в Google Sheets: {e}")
+# ===== Google Sheets =====
+def append_to_sheet(values):
+    body = {"values": [values]}
+    sheets_service.spreadsheets().values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range="Лист1!A:A",
+        valueInputOption="RAW",
+        body=body
+    ).execute()
 
-def main():
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-
-    application.run_polling()
-
+# ===== Запуск =====
 if __name__ == "__main__":
-    main()
+    logging.info("Starting bot...")
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.run_polling()
